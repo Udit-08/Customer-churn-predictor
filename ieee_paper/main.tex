@@ -1,0 +1,153 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{url}
+\usepackage{array}
+
+\begin{document}
+
+\title{Customer Churn Prediction and Customer Segmentation in a Telecommunications Dataset}
+
+\author{\IEEEauthorblockN{Your Name}
+\IEEEauthorblockA{Department or Program\\
+Institution Name\\
+City, Country\\
+email@example.com}}
+
+\maketitle
+
+\begin{abstract}
+Customer churn reduces recurring revenue and makes customer-retention planning difficult. This paper presents a practical analysis of a 7,043-customer telecommunications churn dataset using supervised prediction and unsupervised segmentation. A class-weighted XGBoost classifier is evaluated with a stratified holdout set and five-fold cross-validation on the training partition. At a raw-score threshold of 0.50, the model obtains 0.854 ROC AUC, 0.797 churn recall, and 0.522 churn precision on the test set. Isotonic calibration fitted from training-only out-of-fold scores improves the test Brier score from 0.158 to 0.134. For customer profiling, a two-stage procedure separates customers without internet service and applies $k$-means ($k=3$) to the remaining customers. The highest-churn internet segment contains 1,889 customers, has a 56.7\% churn rate, and accounts for 57.4\% of observed churners. A density-based structural check returns the internet/no-internet split, while silhouette results indicate that the internet segments overlap substantially. A separate shallow decision tree provides interpretable, supervised risk rules and is evaluated on held-out customers. The results illustrate how prediction, profiling, and risk grouping can complement one another, while emphasizing that associations in a single snapshot do not establish causation or future retention impact.
+\end{abstract}
+
+\begin{IEEEkeywords}
+customer churn, telecommunications, XGBoost, calibration, customer segmentation, $k$-means, HDBSCAN
+\end{IEEEkeywords}
+
+\section{Introduction}
+Customer churn analysis combines two related but different objectives. A supervised model estimates which customers are more likely to leave, while unsupervised methods summarize customers with similar service and billing patterns. A useful project should report both model performance and the limits of the groups it produces.
+
+This study implements both tasks in a Streamlit application. The supervised component predicts the binary \texttt{Churn Value} outcome with XGBoost \cite{chen2016xgboost}. The unsupervised component groups customers using contract, service, tenure, and billing features. A held-out decision tree is also used to produce readable risk rules; because it learns from churn outcomes, it is explicitly treated as supervised prioritization rather than as a natural customer segmentation.
+
+The contributions are: (1) a leakage-aware prediction workflow with stratified holdout evaluation, training-only cross-validation, and out-of-fold probability calibration; (2) a two-stage customer segmentation with post-hoc churn and profile summaries; and (3) separate structural and supervised-rule checks that prevent customer clusters and churn-risk rules from being conflated.
+
+\section{Dataset and Preparation}
+The analysis uses the project workbook \texttt{Telco\_customer\_churn.xlsx}, containing 7,043 customer records. The target is \texttt{Churn Value}, where 1 denotes churn and 0 denotes retention. The observed churn prevalence is 26.5\% (1,869 customers). The workbook's source provenance is not recorded in the project, so the results should be interpreted as an analysis of the supplied snapshot rather than as a representative sample of all telecommunications customers.
+
+The predictor set contains 16 categorical variables and three numeric variables: tenure in months, monthly charges, and total charges. Blank total charges for zero-tenure customers are set to zero, consistent with the project preprocessing. Other numeric missing values are median-imputed, and categorical missing values are imputed using the most frequent training value. Categorical inputs are one-hot encoded; numeric inputs are standardized for the modeling pipeline. All fitted preprocessing is learned on the relevant training partition.
+
+\texttt{Churn Value} is the outcome, never an input. The fields \texttt{Churn Label}, \texttt{Churn Reason}, \texttt{Churn Score}, and \texttt{CLTV} are excluded to prevent target leakage or post-outcome information from entering prediction. Customer identifiers and location fields are also excluded. \texttt{Churn Reason} is used only for descriptive, post-churn summaries in the application.
+
+\section{Methods}
+\subsection{Supervised Churn Prediction}
+The data are split into training and test partitions in an 80:20 ratio using stratification and random seed 42. The training partition contains 5,634 rows; the untouched test partition contains 1,409 rows. The model uses an XGBoost classifier with 300 trees, learning rate 0.05, maximum depth 3, minimum child weight 2, and row and column subsampling of 0.8. The positive-class weight is calculated from training labels only to account for the class imbalance. Five-fold stratified cross-validation is run within the training partition; each fold's preprocessing and class weight are fitted using that fold's training rows.
+
+The reported classification threshold is 0.50 on the raw model score. Accuracy, churn precision, churn recall, churn F1, and ROC AUC are reported. The confusion matrix is defined with retained customers as class 0 and churned customers as class 1. Calibration is fitted by isotonic regression using training-only out-of-fold scores and labels. Test-set Brier score and expected calibration error (ECE) compare raw scores with calibrated probabilities. The test set is not used to fit the model, preprocessing, class weights, or calibrator.
+
+Permutation importance is computed on the held-out test partition by measuring the change in ROC AUC after shuffling one original input field. It is an explanatory summary of this fitted model, not evidence that a feature causes churn.
+
+\subsection{Unsupervised Customer Segmentation}
+The segmentation feature matrix includes customer service, contract, tenure, and billing variables; it excludes churn outcomes and post-churn fields. Numeric fields are standardized and categorical fields are one-hot encoded using the application preprocessing. The default two-stage approach first assigns customers with \texttt{Internet Service = No} to a separate group, then applies $k$-means with $k=3$ to the 5,517 customers with internet service. The no-internet group is a rule-based partition, not a cluster discovered by $k$-means. Churn is used only after assignment to describe each group.
+
+The application also provides single-stage $k$-means, Ward agglomerative clustering, and DBSCAN for comparison. Silhouette values nearer one indicate better separation, while values near zero indicate overlapping groups \cite{rousseeuw1987silhouettes}. The structural check applies HDBSCAN to a ten-component PCA representation of the full transformed customer data \cite{campello2013hdbscan}. The HDBSCAN result is used as a diagnostic only; it does not determine the default two-stage memberships. PCA is a display and structural-check transformation; the default $k$-means assignments use the full transformed feature matrix.
+
+\subsection{Supervised Risk Rules}
+A shallow decision tree is trained separately on the predictor set and churn target. It uses a stratified 80:20 split with seed 42, maximum depth 3, and a minimum of 200 training observations per leaf. The tree's categorical preprocessing is fitted on the training partition only. Each rule's reported churn rate is calculated on held-out test customers. These groups are outcome-informed risk strata and are not included in the unsupervised cluster formation.
+
+\section{Results}
+\subsection{Prediction Performance}
+Table~\ref{tab:performance} reports the XGBoost results on the fixed test partition. The model identifies 298 of 374 churners at the reference threshold (recall 0.797) and correctly flags 298 of 571 predicted churners (precision 0.522). The confusion matrix is shown in Table~\ref{tab:cm}. The ROC AUC of 0.854 indicates useful ranking ability across thresholds, but the moderate precision means that many flagged customers did not churn in this snapshot. Accuracy alone would not convey this trade-off.
+
+\begin{table}[!t]
+\centering
+\caption{XGBoost Test-Set Performance at Raw Threshold 0.50}
+\label{tab:performance}
+\begin{tabular}{lc}
+\toprule
+Metric & Value \\
+\midrule
+Accuracy & 0.752 \\
+Churn precision & 0.522 \\
+Churn recall & 0.797 \\
+Churn F1 & 0.631 \\
+ROC AUC & 0.854 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!t]
+\centering
+\caption{Confusion Matrix (Rows: Actual; Columns: Predicted)}
+\label{tab:cm}
+\begin{tabular}{lrr}
+\toprule
+ & Retained & Churned \\
+\midrule
+Retained & 762 & 273 \\
+Churned & 76 & 298 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Across five training-only folds, mean ROC AUC is 0.862 (standard deviation 0.010), mean recall is 0.815 (0.037), and mean F1 is 0.646 (0.019). These fold values indicate some variation in recall across partitions. Calibration reduces test Brier score from 0.158 to 0.134 and ECE from 0.127 to 0.026. This supports improved probability alignment on this split; further-period data are needed to establish whether calibration persists.
+
+The largest permutation importance drops in ROC AUC are associated with contract (0.061), tenure (0.045), and dependents (0.040). Internet service (0.009) and total charges (0.008) follow. These values reflect reliance by the fitted model under feature shuffling and should not be interpreted as causal effects.
+
+\subsection{Customer Segmentation}
+The default two-stage procedure produces three internet-customer groups and one no-internet group. Table~\ref{tab:segments} summarizes their sizes, churn rates, median tenure, and mean monthly charge. The largest churn rate occurs in segment 2: 1,889 customers, 56.7\% churn, median tenure of 12 months, and mean monthly charges of \$84.47. This group contains 57.4\% of all observed churners. The no-internet group contains 1,526 customers and has a 7.4\% churn rate.
+
+\begin{table*}[!t]
+\centering
+\caption{Two-Stage Segment Profiles}
+\label{tab:segments}
+\begin{tabular}{crrrr}
+\toprule
+Segment ID & Customers & Churn rate (\%) & Median tenure (months) & Mean monthly charge (\$) \\
+\midrule
+0 & 1,701 & 24.7 & 17 & 50.71 \\
+1 & 1,927 & 13.7 & 62 & 92.44 \\
+2 & 1,889 & 56.7 & 12 & 84.47 \\
+3 (no internet) & 1,526 & 7.4 & 25 & 21.08 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+HDBSCAN returns two groups with sizes 5,517 and 1,526 at each of the tested minimum cluster sizes (100, 200, and 400), with no points assigned as noise. These counts match the internet/no-internet division in the workbook. The silhouette scores for the displayed groups are 0.068, 0.180, 0.188, and 0.418 for segments 0 through 3, respectively. The no-internet group is more separated in the encoded feature space, while the internet groups have substantial overlap. Thus, the internet groups are most appropriately interpreted as useful customer profiles along a gradient, rather than as sharply distinct natural types.
+
+\subsection{Supervised Risk Rules}
+The held-out decision-tree rule \emph{month-to-month contract, fiber-optic internet, and tenure at most 13 months} contains 197 test customers. Its test churn rate is 67.0\%, and it contains 35.3\% of test-set churners. This rule offers a compact description for prioritization, but it is learned using churn labels and is therefore conceptually distinct from the unsupervised segments. Its estimated churn rate is specific to this split and requires validation before operational use.
+
+\section{Discussion}
+The supervised model and segmentation answer different questions. XGBoost ranks individual customers by estimated churn risk and, after calibration, provides probability estimates. The unsupervised procedure summarizes shared service and billing patterns. The decision-tree risk rules bridge the two by making outcome-informed groups readable. Keeping these analyses separate prevents a high-churn segment from being mistaken for a group formed independently of churn.
+
+The two-stage segmentation is useful for presentation because customers without internet service form a distinct profile in the encoded data, while internet customers show variation in tenure, contract, and billing. However, the apparent structural separation for the no-internet group is partly expected because the approach explicitly partitions on that field. HDBSCAN corroborates the separation present in the feature representation, but it does not establish a new customer taxonomy. Weak silhouette values among internet groups reinforce the need for cautious interpretation.
+
+\section{Limitations and Future Work}
+First, the analysis uses a single 7,043-row snapshot with no documented sampling frame or time-based validation. Performance may change across providers, regions, or future periods. Second, the stratified random split does not test temporal generalization. Third, the risk tree and cluster churn profiles describe associations; they cannot demonstrate that a retention intervention will prevent churn. Fourth, clustering depends on one-hot encoding and Euclidean geometry, and results can change with feature representation and hyperparameters. Future work should evaluate later-period customers, compare models under a predefined validation protocol, validate calibrated probabilities on subsequent cohorts, and test retention actions through a controlled experiment.
+
+\section{Conclusion}
+This project combines churn prediction, customer profiling, and interpretable risk grouping in one reproducible application. On a fixed held-out split, XGBoost provides 0.854 ROC AUC and 0.797 churn recall at the reference threshold, with isotonic calibration improving probability-error measures. Two-stage segmentation identifies a high-churn month-to-month/fiber/short-tenure profile and a low-churn no-internet profile; separation among internet customers is comparatively weak. These results support exploratory prioritization and communication, while additional temporal and intervention-based validation is required before drawing operational or causal conclusions.
+
+\begin{thebibliography}{00}
+
+\bibitem{chen2016xgboost}
+T. Chen and C. Guestrin, ``XGBoost: A scalable tree boosting system,'' in \emph{Proc. 22nd ACM SIGKDD Int. Conf. Knowledge Discovery and Data Mining}, 2016, pp. 785--794, doi: 10.1145/2939672.2939785.
+
+\bibitem{pedregosa2011sklearn}
+F. Pedregosa \emph{et al.}, ``Scikit-learn: Machine learning in Python,'' \emph{J. Mach. Learn. Res.}, vol. 12, pp. 2825--2830, 2011.
+
+\bibitem{ester1996dbscan}
+M. Ester, H.-P. Kriegel, J. Sander, and X. Xu, ``A density-based algorithm for discovering clusters in large spatial databases with noise,'' in \emph{Proc. 2nd Int. Conf. Knowledge Discovery and Data Mining}, 1996, pp. 226--231.
+
+\bibitem{campello2013hdbscan}
+R. J. G. B. Campello, D. Moulavi, and J. Sander, ``Density-based clustering based on hierarchical density estimates,'' in \emph{Advances in Knowledge Discovery and Data Mining}, Lecture Notes in Computer Science, vol. 7819, 2013, pp. 160--172.
+
+\bibitem{rousseeuw1987silhouettes}
+P. J. Rousseeuw, ``Silhouettes: A graphical aid to the interpretation and validation of cluster analysis,'' \emph{J. Comput. Appl. Math.}, vol. 20, pp. 53--65, 1987.
+
+\end{thebibliography}
+
+\end{document}
