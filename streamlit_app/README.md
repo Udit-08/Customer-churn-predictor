@@ -14,6 +14,9 @@ reference materials and are not modified by the app.
   calibration, gain curve, and permutation importance.
 - Customer prediction form with calibrated probability and per-customer
   explanation.
+- Survival analysis with Kaplan–Meier retention curves, a Cox proportional-
+  hazards model, tenure-band event rates, holdout discrimination/calibration
+  checks, and a retention curve for the customer entered in the prediction form.
 - An action center that ranks existing retained customers with out-of-fold
   estimates and can export the filtered contact list as CSV.
 - Two-stage segmentation by default: separate customers without internet service,
@@ -97,6 +100,14 @@ calibrated probabilities; action-center scores are out-of-fold estimates, not
 guarantees of future behavior. The action center treats Churn Value = 0 as still
 retained in this snapshot. Revenue at risk is a simple monthly estimate:
 calibrated churn probability multiplied by monthly charges.
+
+The survival page uses tenure as observed duration and Churn Value as the event
+indicator; customers who have not churned are treated as right-censored. Tenure
+and Total Charges are excluded from Cox predictors. The holdout encoder and
+monthly-charge scaling are fitted on training rows only. Personalized retention
+curves use the final model refitted on all supplied rows and are estimates under
+the Cox model assumptions. The proportional-hazards assumption is not tested by
+the app.
 
 For clustering, higher Silhouette and Calinski-Harabasz scores are generally
 preferred, while lower Davies-Bouldin is generally preferred. DBSCAN label -1

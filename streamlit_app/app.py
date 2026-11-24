@@ -20,6 +20,7 @@ from src.models import (
     score_all_customers, threshold_table,
 )
 from src.risk_segments import fit_risk_tree
+from src.survival import customer_curve, fit_survival, hazard_by_tenure, kaplan_meier
 from src.ui import (
     AMBER, BLUE, CORAL, GREY, NAVY, PALETTE, TEAL, card, insight, kpi, money, note,
     page_header, setup_page, show, table,
@@ -93,6 +94,11 @@ def get_kmeans_labels(data, k=3):
 @st.cache_data(show_spinner="Fitting the supervised risk tree…")
 def get_risk_tree(data, depth, min_leaf):
     return fit_risk_tree(data, depth, min_leaf)
+
+
+@st.cache_resource(show_spinner="Fitting the survival model…")
+def get_survival(data):
+    return fit_survival(data)
 
 
 @st.cache_resource(show_spinner="Scoring every customer…")
@@ -339,7 +345,7 @@ def render_prediction(data, scored):
                 "customers; thresholds and calibration are learned from training data only.")
     result = get_models(data)
     tabs = st.tabs(["Performance", "Threshold and cost", "Probabilities", "What drives it",
-                    "Score a customer"])
+                    "Score a customer", "Time to churn"])
 
     # ---- Performance ----
     with tabs[0]:
@@ -525,6 +531,112 @@ def render_prediction(data, scored):
             show(fig, key="sc_why")
         st.caption("Reasons come from XGBoost's built-in tree explanations. They describe this model's "
                    "behaviour for this customer, not a guaranteed cause.")
+
+    with tabs[5]:
+        render_survival(data, values)
+
+
+def render_survival(data, values):
+    page_header("Survival analysis", "Time to churn",
+                "Estimate retention over time while accounting for customers who have not churned yet.")
+    st.write(
+        "The XGBoost model estimates **who** is more likely to churn. Survival analysis estimates "
+        "**when**, treating customers still active in this snapshot as right-censored observations. "
+        "The analysis uses tenure as observed time and assumes censoring is independent after accounting "
+        "for the included customer features."
+    )
+    try:
+        surv = get_survival(data)
+    except ImportError as exc:
+        st.error(str(exc))
+        return
+    except Exception as exc:
+        st.error(f"The survival model could not be fitted: {exc}")
+        return
+
+    k1, k2, k3 = st.columns(3)
+    kpi(k1, "Test-set concordance (C-index)", f"{surv['c_index']:.3f}",
+        f"contract-only baseline {surv['c_index_contract_only']:.3f}")
+    kpi(k2, "AUC for churn by month 12", f"{surv['auc_12']:.3f}",
+        "test customers with a known 12-month outcome")
+    top_group = surv["calibration"].iloc[-1]
+    kpi(k3, "Highest-risk group: observed churn by month 12",
+        f"{top_group['Observed churn by month 12']:.0%}",
+        f"model estimate {top_group['Predicted churn by month 12']:.0%}")
+
+    group_field = st.radio(
+        "Compare retention by", ["Contract", "Internet Service", "Payment Method",
+                                "Dependents", "All customers"],
+        horizontal=True, key="sv_group",
+    )
+    curves = kaplan_meier(data, None if group_field == "All customers" else group_field)
+    fig = px.line(curves, x="Month", y="Retained", color="Group",
+                  title="Kaplan–Meier estimate: share still retained")
+    fig.update_yaxes(tickformat=".0%", range=[0, 1.02])
+    fig.update_layout(xaxis_title="Months since joining", yaxis_title="Estimated retention", height=390)
+    show(fig, key="sv_km")
+
+    left, right = st.columns(2)
+    with left:
+        hazard = hazard_by_tenure(data)
+        fig = px.bar(hazard, x="Months", y="Monthly churn rate", title="Observed churn events per customer-month",
+                     text=hazard["Monthly churn rate"].map(lambda rate: f"{rate:.1%}"))
+        fig.update_traces(marker_color=TEAL, textposition="outside")
+        fig.update_yaxes(tickformat=".0%")
+        fig.update_layout(xaxis_title="Tenure interval (months)", yaxis_title="Events / customer-month", height=350)
+        show(fig, key="sv_hazard")
+    with right:
+        calibration = surv["calibration"].melt(
+            id_vars=["Risk group", "Customers"],
+            value_vars=["Predicted churn by month 12", "Observed churn by month 12"],
+            var_name="Estimate", value_name="Churn by month 12",
+        )
+        fig = px.bar(
+            calibration, x="Risk group", y="Churn by month 12", color="Estimate", barmode="group",
+            title="Predicted and Kaplan–Meier observed churn by month 12",
+            color_discrete_map={"Predicted churn by month 12": BLUE,
+                                "Observed churn by month 12": CORAL},
+        )
+        fig.update_yaxes(tickformat=".0%")
+        fig.update_layout(xaxis_title="Risk group (lowest to highest)", yaxis_title="", height=350,
+                          legend=dict(orientation="h", y=-0.28, x=0, xanchor="left", title_text=""))
+        show(fig, key="sv_cal")
+    st.caption(
+        "The test-set calibration chart compares mean predictions with Kaplan–Meier estimates in five risk groups. "
+        "It is a descriptive check on this holdout split, not proof that timing estimates will remain calibrated later."
+    )
+
+    st.markdown("#### Retention curve for the customer in the prediction form")
+    sample_fields = CATEGORICAL_FEATURES + ["Monthly Charges"]
+    sample = pd.DataFrame([{field: values[field] for field in sample_fields}])
+    mine = customer_curve(surv, sample)
+    tenure = int(values["Tenure Months"])
+    base = float(mine.loc[mine["Month"] == tenure, "Retained"].iloc[0])
+    horizon_cols = st.columns(4)
+    for col, months in zip(horizon_cols, [6, 12, 24, 36]):
+        future_month = min(tenure + months, 72)
+        future = float(mine.loc[mine["Month"] == future_month, "Retained"].iloc[0])
+        conditional_retention = future / base if base > 0 else 0.0
+        col.metric(f"Retained {months} more months", f"{conditional_retention:.0%}",
+                   f"to tenure month {future_month}")
+    fig = go.Figure(go.Scatter(x=mine["Month"], y=mine["Retained"], mode="lines",
+                               line=dict(color=TEAL, width=3), name="Estimated retention"))
+    fig.add_vline(x=tenure, line_dash="dot", line_color=GREY, annotation_text="current tenure")
+    fig.update_yaxes(tickformat=".0%", range=[0, 1.02])
+    fig.update_layout(xaxis_title="Months since joining", yaxis_title="Estimated retention", height=330)
+    show(fig, key="sv_customer")
+    st.caption(
+        "The horizon values are conditional on the customer having remained active until their current tenure. "
+        "They are model estimates, not guarantees. The Cox proportional-hazards assumption is not tested in this app."
+    )
+
+    with st.expander("Cox-model hazard ratios"):
+        effects = surv["effects"].sort_values("Hazard ratio")
+        table(effects.round(3), hide_index=True)
+        st.caption(
+            "A hazard ratio above 1 is associated with a higher instantaneous churn rate; below 1 with a lower rate, "
+            "conditional on the model features. Associations do not prove causes."
+        )
 
 
 def render_choosing_k(ks, stable, internet_only):
